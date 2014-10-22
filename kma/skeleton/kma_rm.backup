@@ -1,0 +1,655 @@
+/***************************************************************************
+ *  Title: Kernel Memory Allocator
+ * -------------------------------------------------------------------------
+ *    Purpose: Kernel memory allocator based on the resource map algorithm
+ *    Author: Stefan Birrer
+ *    Copyright: 2004 Northwestern University
+ ***************************************************************************/
+/***************************************************************************
+ *  ChangeLog:
+ * -------------------------------------------------------------------------
+ *    Revision 1.2  2009/10/31 21:28:52  jot836
+ *    This is the current version of KMA project 3.
+ *    It includes:
+ *    - the most up-to-date handout (F'09)
+ *    - updated skeleton including
+ *        file-driven test harness,
+ *        trace generator script,
+ *        support for evaluating efficiency of algorithm (wasted memory),
+ *        gnuplot support for plotting allocation and waste,
+ *        set of traces for all students to use (including a makefile and README of the settings),
+ *    - different version of the testsuite for use on the submission site, including:
+ *        scoreboard Python scripts, which posts the top 5 scores on the course webpage
+ *
+ *    Revision 1.1  2005/10/24 16:07:09  sbirrer
+ *    - skeleton
+ *
+ *    Revision 1.2  2004/11/05 15:45:56  sbirrer
+ *    - added size as a parameter to kma_free
+ *
+ *    Revision 1.1  2004/11/03 23:04:03  sbirrer
+ *    - initial version for the kernel memory allocator project
+ *
+ ***************************************************************************/
+#ifdef KMA_RM
+#define __KMA_IMPL__
+
+/************System include***********************************************/
+#include <assert.h>
+#include <stdlib.h>
+
+/************Private include**********************************************/
+#include "kma_page.h"
+#include "kma.h"
+
+/************Defines and Typedefs*****************************************/
+/*  #defines and typedefs should have their names in all caps.
+ *  Global variables begin with g. Global constants with k. Local
+ *  variables should be in all lower case. When initializing
+ *  structures and arrays, line everything up in neat columns.
+ */
+typedef struct node
+{
+  int size;
+  void* addr;
+  struct node* next;
+  struct node* prev;
+}list;
+typedef struct pageinfo
+{
+  kma_page_t* addr;
+  struct pageinfo* next;
+  struct pageinfo* prev;
+}page_info;
+typedef struct
+{
+  page_info* pagelist;
+  list* freelist;
+  list* emptylist;
+  list* listtail;
+  int freesize;
+  int total_alloc;
+  int total_free;
+}mem_ctrl;
+/************Global Variables*********************************************/
+static kma_page_t* entry = NULL;
+/************Function Prototypes******************************************/
+
+void init_ctrl();
+void* search_fit(int size);
+void update_list(list* node,int size);
+list* add_node(void* addr,int size,list* node);
+list* set_new_page();
+page_info* get_new_page();
+//void insert_node();
+list* search_list();
+void merge_block();
+void free_all();
+void add_empty_list(list* node);
+list* search_empty_list();
+list* search_page(void* ptr);
+/************External Declaration*****************************************/
+
+/**************Implementation***********************************************/
+
+void report_bug() {
+	printf("fuck you\n");
+}
+
+
+void*
+kma_malloc(kma_size_t size)
+{
+  printf("------------------------------------Malloc----------------------------------------\n");
+  //Judge if the request is larger than PAGESIZE
+  if((size + sizeof(void*)) > PAGESIZE)
+    return NULL;
+
+  // Initialize the KMA control unit
+  if(entry == NULL)
+    init_ctrl();
+
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+
+  // Search for first fit
+  void* fit = search_fit(size);
+
+  // Add total alloc
+  controller->total_alloc = controller->total_alloc + 1;
+  printf("The address alloced is: %p\n",fit); 
+  printf("Total alloc: %d\n",controller->total_alloc);
+  list* pp = controller->freelist;
+  printf("*************Show list***************\n");
+  int i = 0;
+  for(i = 0; i < 50; i++)
+  {
+	printf("%p\n",pp);
+	pp = pp -> next;
+	if(!pp)
+	  break;
+  }
+  printf("*************End  Show***************\n");
+  printf("----------------------------------Malloc Done-------------------------------------\n");
+  return fit;
+}
+
+void
+kma_free(void* ptr, kma_size_t size)
+{
+  printf("-------------------------------------Free-----------------------------------------\n");
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  list* p = controller->freelist;
+  printf("ptr: %p\n",ptr);
+  printf("blocksize: %d\n",size);
+  printf("controller->freelist: %p\n",p);
+  // Search same page free block
+  list* same_page = search_page(ptr);
+  
+  // Merge or not 
+  if(same_page)
+  {
+	merge_block(ptr,same_page,size);
+  }
+  else
+  { 
+	add_node(ptr,size,NULL);
+  }
+
+  // Add total free
+  controller->total_free = controller->total_free + 1;
+
+  printf("Total Free: %d\n",controller->total_free);
+  // If done, free all pages
+  if(controller->total_alloc == controller->total_free)
+	free_all();
+  
+  list* pp = controller->freelist;
+  printf("*************Show list***************\n");
+  int i = 0;
+  for(i = 0; i < 50; i++)
+  {
+	printf("%p\n",pp);
+	pp = pp -> next;
+	if(!pp)
+	  break;
+  }
+  printf("*************End  Show***************\n");
+  printf("-----------------------------------Free Done--------------------------------------\n");
+  return; 
+}
+
+void init_ctrl()
+{
+  //Get the first page  
+  kma_page_t* first_page = get_page();
+
+  //Save the pointer to the head of first page;
+  *((kma_page_t**)first_page->ptr) = first_page;
+  kma_page_t* q = *(kma_page_t**)first_page->ptr;
+  //Init entry
+  entry = first_page;
+  
+  //Alloc memory for controll unit;
+  mem_ctrl* controller = first_page->ptr + sizeof(kma_page_t*);
+  controller->pagelist = (page_info*)((char*)controller + sizeof(mem_ctrl));
+  controller->freelist = (list*)((char*)controller->pagelist + sizeof(page_info));
+  controller->emptylist = NULL;
+  controller->total_alloc = 0;
+  controller->total_free = 0;
+ 
+  
+  //Get new page
+  kma_page_t* new_page = get_page();
+  *((kma_page_t**)new_page->ptr) = new_page;
+  page_info* new_page_info;
+  new_page_info =(page_info*) (new_page->ptr + sizeof(kma_page_t*));
+  new_page_info->prev = controller->pagelist;
+  new_page_info->next = NULL;
+  new_page_info->addr = *(kma_page_t**)new_page->ptr;
+  //Init pagelist and freelist
+  controller->pagelist->addr = *(kma_page_t**)first_page->ptr; 
+  controller->pagelist->next = new_page_info ;
+  controller->pagelist->prev = NULL;
+
+  controller->freelist->addr = (char*)new_page_info + sizeof(page_info);
+  controller->freelist->size = PAGESIZE - sizeof(kma_page_t*) - sizeof(page_info);  
+  controller->freelist->next = NULL;
+  controller->freelist->prev = NULL;
+  controller->listtail = controller->freelist;
+  controller->freesize = PAGESIZE - sizeof(kma_page_t*) - sizeof(page_info) -sizeof(list);
+  printf("*******************************************************************\n");
+  printf("entry: %p\n", entry->ptr);
+  printf("controller: %p\n", controller);
+  printf("controller->pagelist: %p\n", controller->pagelist);
+  printf("controller->freelist: %p\n", controller->freelist);
+  printf("controller->freelist->size: %d\n", controller->freelist->size);
+  printf("controller->freelist->addr: %p\n", controller->freelist->addr);
+  printf("controller->freelist->next: %p\n", controller->freelist->next);
+  printf("controller->freelist->prev: %p\n", controller->freelist->prev);
+  printf("controller->freesize: %d\n",controller->freesize);
+  printf("controller->total_alloc: %d\n",controller->total_alloc);
+  printf("controller->total_free: %d\n",controller->total_free);
+  printf("First page address: %p\n", controller->pagelist->addr->ptr);
+  printf("Second page address: %p\n", controller->pagelist->next->addr->ptr);
+  printf("Real first: %p\n", first_page->ptr);
+  printf("Real Second: %p\n", new_page->ptr);
+  printf("*******************************************************************\n");
+  
+  return;
+}
+
+void* search_fit(int size)
+{
+  
+  // Search freelist
+  list* fit = search_list(size);
+  printf("fit returned: %p\n",fit); 
+  // Return result
+  if(fit)
+  {
+    void* p = fit->addr;
+	update_list(fit,size);
+	return p;
+  }
+  else 
+  {
+	fit = set_new_page();
+    void* p = fit->addr;
+	update_list(fit,size);
+	return p;
+  }
+}
+
+list* search_list(int size)
+{
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  printf("*****************Search freelist for first fit*********************\n");
+  printf("controller->freelist: %p\n", controller->freelist);
+  printf("size wanted: %d\n", size);
+  //Search freelist
+  list* p = controller->freelist;
+  while(p)
+    {
+      printf("current p: %p\n", p);
+      printf("current p->size: %d\n", p->size);
+      if(p->size < size)
+	  {
+		p = p->next;
+		continue;
+	  }
+	  else
+	  {
+	    printf("******************************Gottcha******************************\n");
+		return p;
+	  }
+	}
+  printf("*******************************Not find****************************\n");
+  return NULL;
+}
+
+void update_list(list* node,int size)
+{
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  printf("****************************update_list****************************\n");
+  printf("node: %p\n",node);
+  printf("node->size: %d\n",node->size);
+  printf("node->prev: %p\n",node->prev); 
+  printf("node->next: %p\n",node->next);
+  printf("size: %d\n",size);
+  if(node->size < size)
+  {
+	perror("You made a mistake!");
+    return;
+  }
+
+  // update list
+  if(node->size == size)
+  {
+	if(node->prev)
+	  node->prev->next = node->next;
+	else
+	  controller->freelist = node->next;
+	if(node->next)
+	  node->next->prev = node->prev;
+    add_empty_list(node);
+  }
+  else
+  {
+    node->size = node->size - size;
+	node->addr = node->addr + size;
+    printf("new_size: %d\n",node->size);
+  }
+  printf("****************************update complete*************************\n");
+
+}
+
+list* set_new_page()
+{
+  
+  printf("****************************Set new page*******************************\n");
+  // Get new page
+  page_info* new_page_info = get_new_page();
+  
+  int size = PAGESIZE - sizeof(kma_page_t*) - sizeof(page_info);
+  list* q = add_node((void*)new_page_info + sizeof(page_info),size,NULL);
+  printf("**************************Set new page done****************************\n");
+  return q;
+}
+list* add_node(void* addr,int size,list* pos)
+{  
+  printf("****************************Add new node*******************************\n");
+  printf("addr: %p\n",addr);
+  printf("size: %d\n",size);
+  printf("pos:%p\n",pos);
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  list* p = controller->freelist;
+  
+  // Search empty list
+  list* t = search_empty_list();
+  
+  // Alloc memory for new node
+  if(controller->freesize >= sizeof(list))
+  {
+	printf("At first\n");
+	list* q;
+	if(t)
+	{
+	  q = t;
+	  while(p->next)
+	  {
+		  printf("heihei => %p %p\n", p, p->next);
+		
+	  if(p == 0x7ffff5a34130) {
+		  report_bug();
+	  }p = p->next;
+	  }
+	}
+	else
+	{
+	  printf("Here\n");
+	  printf("p: %p\n",p);
+	  printf("p->next: %p\n",p->next);
+	  printf("controller->listtail: %p\n",controller->listtail);
+	  while(p->next)
+        p = p->next;
+	  printf("p: %p\n",p);
+	  q = controller->listtail + 1;
+	  controller->listtail = q;
+	  //printf("p+1: %p\n",q);
+	  controller->freesize = controller->freesize - sizeof(list);
+	}
+	q->next = pos;
+	q->size = size;
+	q->addr = addr;
+	printf("New_node: %p\n",q);
+	printf("New_node->prev: %p\n",q->prev);
+	printf("New_node->next: %p\n",q->next);
+	
+	if(pos)
+	{
+      printf("pos: %p\n",pos);
+      printf("pos->prev: %p\n",pos->prev);
+	  printf("pos->next: %p\n",pos->next);
+	  printf("pos->addr: %p\n",pos->addr);
+	  printf("pos->size: %d\n",pos->size);
+	  q->prev = pos->prev;
+      if(pos->prev)
+	  {
+		pos->prev->next = q;
+		pos->prev = q;
+	  }
+	  else
+	  {
+		controller->freelist = q; 
+	    pos->prev = q;
+	  }
+	}
+	else
+    {
+      q->prev = p;
+	  p->next = q;
+	}
+	printf("In the end\n");
+	printf("p: %p\n",p);
+	printf("p->prev: %p\n",p->prev);
+	printf("p->next: %p\n",p->next);
+	printf("p->addr: %p\n",p->addr);
+	printf("p->size: %d\n",p->size);
+    printf("pos: %p\n",pos);
+	//printf("pos->prev: %p\n",pos->prev);
+	//printf("pos->next: %p\n",pos->next);
+	//printf("pos->addr: %p\n",pos->addr);
+	//printf("pos->size: %d\n",pos->size);
+    printf("Listtail: %p\n",controller->listtail);
+	printf("New_node: %p\n",q);
+	printf("New_node->prev: %p\n",q->prev);
+	printf("New_node->next: %p\n",q->next);
+	printf("New_node->addr: %p\n",q->addr);
+	printf("New_node->size: %d\n",q->size);
+    printf("****************************New Node add*******************************\n");
+	return q;
+  }
+  else
+  {	
+ 	list* q;
+	if(t)
+	  q = t;
+	else
+	{
+	  page_info* new_page_info = get_new_page();
+	  q = (list*)((char*)new_page_info + sizeof(page_info));
+	  controller->listtail = q;
+	  controller->freesize = PAGESIZE - sizeof(kma_page_t*) - sizeof(page_info) - sizeof(list);
+	}  
+	q->next = pos;
+	q->size = size;
+	q->addr = addr;
+	if(pos)
+	{
+	  q->prev = pos->prev;
+	  if(pos->prev)
+	  {
+		pos->prev->next = q;
+		pos->prev = q;
+	  }
+	  else
+	  {
+		controller->freelist = q;
+		pos->prev = q;
+	  }
+	}
+	else
+	{
+	  while(p->next)
+        p = p->next;
+	  p->next = q;
+	  q->prev = p;
+	}
+    printf("****************************New node add*******************************\n");
+	return q;	
+  }
+}
+
+page_info* get_new_page()
+{
+  printf("****************************Get New page*******************************\n");
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  printf("controller: %p\n",controller);
+  
+  printf("pagelist: %p\n",controller->pagelist);
+  // Get new page
+  kma_page_t* new_page = get_page();
+  *((kma_page_t**)new_page->ptr) = new_page;
+  page_info* new_page_info;
+  new_page_info =(page_info*) (new_page->ptr + sizeof(kma_page_t*));
+  new_page_info->next = NULL;
+  new_page_info->addr = *(kma_page_t**)new_page->ptr;
+  
+  // Add to pagelist
+  page_info* p = controller->pagelist;
+  printf("pagelist: %p\n",controller->pagelist);
+  while(p)
+  {
+    if(!(p->next))
+	  {
+	    p->next = new_page_info;
+		new_page_info->prev = p->next; 
+	    break;
+	  }
+	else
+	  {
+		p = p->next;
+	  }
+  }
+  printf("****************************New page get*******************************\n");
+  return new_page_info;
+}
+
+list* search_page(void* ptr)
+{
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  
+  printf("************************Search for same_page**************************\n");
+  printf("ptr: %p\n",ptr);
+  printf("controller->freelist->addr: %p\n",controller->freelist->addr);
+
+  // t is used to judge whether ptr and p are in same page
+  void* t = (unsigned long)ptr & (~(PAGESIZE - 1));
+ 
+  //search the freelist
+  list* p = controller->freelist;
+  void* m = controller->freelist->addr;
+  while(p)
+  {
+	void* q = (unsigned long)m & (~(PAGESIZE - 1));
+	if(t == q)
+	{
+	  printf("Find same page: %p\n",p);
+	  return p;
+	}
+	else
+	  p = p->next;
+  }
+  printf("Didn't find same page: %p\n",p);
+  return p;
+}
+
+void merge_block(void* ptr,list* same_page,int size)
+{
+  printf("****************************Merge********************************\n");
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  void* t = (unsigned long)ptr & (~(PAGESIZE - 1));
+  void* q = (unsigned long)same_page->addr & (~(PAGESIZE - 1));
+  // Search for blocks to merge
+  printf("ptr: %p\n",ptr);
+  printf("same_page->addr: %p\n",same_page->addr);
+  printf("ptr size: %p\n",size);
+  while(t == q)
+  {
+	if(ptr < same_page->addr)
+	{ 
+      printf("ptr is on the left\n");
+	  if((ptr + size) == same_page->addr)
+      {
+	    same_page->addr = ptr;
+	    same_page->size = same_page->size + size;
+        printf("****************************Merged********************************\n");
+	    return;
+	  }
+	  else
+	  {
+	    add_node(ptr,size,same_page); 
+        printf("****************************Merged********************************\n");
+		return;
+	  }
+	}
+	else
+	{
+	  if((same_page->addr + same_page->size) == ptr)
+	  {
+		same_page->size = size + same_page->size;
+        printf("****************************Merge********************************\n");
+	    return;
+	  }
+	  else
+	  {
+	    same_page = same_page->next;
+        q = (unsigned long)same_page & (~(PAGESIZE - 1));
+	  }
+	}
+  }
+  add_node(ptr,size,same_page);
+  printf("****************************Merge********************************\n");
+  return;
+}
+
+void free_all()
+{
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+
+  page_info* p = controller->pagelist;
+  page_info* q;
+  while(p)
+  {
+	q = p->next;
+	printf("Gonna free: %p\n",p->addr);
+	printf("Gonna free: %p\n",p->addr->ptr);
+	free_page(p->addr);
+    
+	  p = q;
+    
+  }
+}
+void add_empty_list(list* node)
+{
+  // Get controller
+  printf("**************************add empty list****************************\n");
+  printf("node: %p\n",node);
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  if(!controller->emptylist)
+    {
+	  controller->emptylist = node;
+	  node->next = NULL;
+	}
+  else
+	{
+	  list* p = controller->emptylist;
+	  while(p)
+	  {
+		if(p->next)
+		  p = p->next;
+	    else
+		{
+		  p->next = node;
+		  break;
+		}
+	  }
+	}
+
+  printf("************************add empty list done*************************\n");
+}
+list* search_empty_list(list* node)
+{
+  // Get controller
+  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
+  if(controller->emptylist)
+  {
+	list* p = controller->emptylist;
+	controller->emptylist = controller->emptylist->next;
+	return p;
+  }
+  else
+  {
+	return NULL;
+  }
+}
+#endif // KMA_RM
