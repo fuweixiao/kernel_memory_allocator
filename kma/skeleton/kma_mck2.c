@@ -32,7 +32,7 @@
  *    - initial version for the kernel memory allocator project
  *
  ***************************************************************************/
-#ifdef KMA_P2FL
+#ifdef KMA_MCK2
 #define __KMA_IMPL__
 
 /************System include***********************************************/
@@ -249,38 +249,6 @@ void delete_node(int i,mem_ctrl* controller)
   controller->freelist[i].next = controller->freelist[i].next->next;
   //printf("------------------------Delete Done--------------------------\n");
 }
-
-/*void* get_free_block(int size)
-{
-  //printf("-----------------------Get free block------------------------\n");
-  if(size < 4097)
-    size = roundup_pow2(size);
-  // Get controller
-  mem_ctrl* controller = (mem_ctrl*)(entry->ptr + sizeof(kma_page_t*));
-  page_item* p = controller->pagelist;
-  while(p)
-  {
-	if(p->freesize > size && size < 4097)
-	{
-	  p->freesize = p->freesize - size;
-	  return (char*)p->page + PAGESIZE - p->freesize - size;
-	}
-	else
-	  p = p->next;
-  }
-  page_item* new_page_item = get_new_page();
-  if(size > 4096)
-    new_page_item->freesize = 0;
-  else
-    new_page_item->freesize = new_page_item->freesize -size;
-  //printf("----------------------------Done-----------------------------\n");
-  if(new_page_item->freesize != 0)
-    return (char*)new_page_item->page + PAGESIZE - new_page_item->freesize - size; 
-  else
-  {
-	return (char*)new_page_item + sizeof(page_item);
-  }	
-}*/
 
 void* get_new_page(int size)
 {
